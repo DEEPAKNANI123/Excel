@@ -1,0 +1,923 @@
+{
+  "name": "PulseReview",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtMinute": 2
+            }
+          ]
+        }
+      },
+      "id": "484d499e-ca09-413d-8dde-c080e55b2e14",
+      "name": "Schedule: Nightly 02:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -816,
+        -256
+      ],
+      "disabled": true,
+      "notes": "Triggers nightly employee sync from SF"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{$env.SF_HOST}}/oauth/token",
+        "sendBody": true,
+        "specifyBody": "form",
+        "options": {}
+      },
+      "id": "7db65fce-fc3f-4fe0-b5c3-7d55eaffbfc7",
+      "name": "Get SF OAuth Token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -592,
+        -256
+      ],
+      "disabled": true,
+      "notes": "Obtain Bearer token using SAML2 bearer grant"
+    },
+    {
+      "parameters": {
+        "url": "=https://{{$env.SF_HOST}}/odata/v4/PerPerson",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "$select",
+              "value": "personIdExternal,firstName,lastName,businessEmail"
+            },
+            {
+              "name": "$expand",
+              "value": "employmentNav($select=userId,managerId,department,jobTitle;$filter=empStatus eq 'A')"
+            },
+            {
+              "name": "$top",
+              "value": "1000"
+            },
+            {
+              "name": "$format",
+              "value": "json"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{$node['Get SF OAuth Token'].json.access_token}}"
+            },
+            {
+              "name": "x-csrf-token",
+              "value": "fetch"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d05123db-3072-494e-b152-3f2fdb95c001",
+      "name": "Fetch Employees from SF",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -368,
+        -256
+      ],
+      "disabled": true,
+      "notes": "GET /odata/v4/PerPerson — active employees with employment details"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO profiles (\n  id,\n  employee_id,\n  first_name,\n  last_name,\n  job_title,\n  department_id,\n  role,\n  manager_id,\n  is_active,\n  last_sap_sync,\n  created_at,\n  auth_email\n)\nVALUES (\n  '{{ $json.id }}',\n  '{{ $json.employee_id }}',\n  '{{ $json.first_name || \"\" }}',\n  '{{ $json.last_name || \"\" }}',\n  '{{ $json.job_title || \"\" }}',\n  {{ $json.department_id ? \"'\" + $json.department_id + \"'\" : \"NULL\" }},\n  '{{ $json.role || \"employee\" }}',\n  {{ $json.manager_id ? \"'\" + $json.manager_id + \"'\" : \"NULL\" }},\n  {{ $json.is_active !== undefined ? $json.is_active : true }},\n  NOW(),\n  {{ $json.created_at ? \"'\" + $json.created_at + \"'\" : \"NOW()\" }},\n  {{ $json.auth_email ? \"'\" + $json.auth_email + \"'\" : \"NULL\" }}\n)\n\nON CONFLICT (id) DO UPDATE SET\n  employee_id = EXCLUDED.employee_id,\n  first_name = EXCLUDED.first_name,\n  last_name = EXCLUDED.last_name,\n  job_title = EXCLUDED.job_title,\n  department_id = EXCLUDED.department_id,\n  role = EXCLUDED.role,\n  manager_id = EXCLUDED.manager_id,\n  is_active = EXCLUDED.is_active,\n  last_sap_sync = NOW(),\n  auth_email = EXCLUDED.auth_email;",
+        "options": {}
+      },
+      "id": "33b32aaa-6e0c-47d0-be90-9d8062e1c003",
+      "name": "Upsert Employees in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        80,
+        -256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      },
+      "notes": "Upsert each employee; ON CONFLICT updates changed fields"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sf_sync_log (\n  sync_type, \n  status, \n  records_in, \n  records_out, \n  meta,\n  ran_at\n)\nVALUES (\n  'employees',\n  'success',\n  {{ $items().length }},\n  {{ $items().length }},\n  '{{ JSON.stringify({\n    total_records: $items().length,\n    workflow: \"employee_sync\",\n    timestamp: new Date().toISOString()\n  }) }}'::jsonb,\n  NOW()\n)\nRETURNING id, sync_type, status, records_in, ran_at;",
+        "options": {}
+      },
+      "id": "36a751a9-068d-4018-ad89-0f1d9db016a6",
+      "name": "Log Sync Result",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        304,
+        -256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "review-submitted",
+        "options": {}
+      },
+      "id": "8a4883f8-b418-44ab-b0e4-3e6d2cded7c1",
+      "name": "Webhook: Review Submitted",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -816,
+        -32
+      ],
+      "webhookId": "wh_review_submitted",
+      "notes": "Triggered by backend when employee submits monthly review"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  p.id,\n  p.employee_id,\n  p.first_name,\n  p.last_name,\n  p.first_name || ' ' || p.last_name AS full_name,\n  p.auth_email,\n  p.job_title,\n  p.department_id,\n  p.role,\n  p.manager_id,\n  p.is_active,\n  p.created_at\n\nFROM profiles p\n\nWHERE p.employee_id = RIGHT('{{ $json.body.employee.manager_id }}', 6);",
+        "options": {}
+      },
+      "id": "25bbff8b-fb23-48c7-b09f-e48f6ae39103",
+      "name": "Get Manager Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -592,
+        -32
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.microsoft.com/v1.0/teams/{{$env.TEAMS_TEAM_ID}}/channels/{{$env.TEAMS_CHANNEL_ID}}/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.TEAMS_TOKEN }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"body\": {\n    \"contentType\": \"html\",\n    \"content\": \"<b>New Review Pending</b><br/>{{ $node['Get Manager Details'].json.employee_name }} submitted their <b>{{ $node['Get Manager Details'].json.month }}/{{ $node['Get Manager Details'].json.year }}</b> review. Score: {{ $node['Get Manager Details'].json.monthly_score }}/3.0<br/><a href='{{ $env.APP_URL }}/manager/reviews'>Review Now →</a>\"\n  }\n}",
+        "options": {}
+      },
+      "id": "fa9e8caa-3377-40d1-a9f4-8be6a128876f",
+      "name": "MS Teams Notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -144,
+        -32
+      ],
+      "disabled": true,
+      "notes": "Post to manager's Teams channel"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months",
+              "monthsInterval": 12
+            }
+          ]
+        }
+      },
+      "id": "453c6577-07e3-46b5-baef-6bd7478865bd",
+      "name": "Schedule: 25th Monthly 09:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -816,
+        192
+      ],
+      "disabled": true,
+      "notes": "Month-end review reminder trigger"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  m.id AS manager_id,\n  m.first_name || ' ' || m.last_name AS manager_name,\n  m.auth_email AS manager_email,\n\n  e.id AS employee_id,\n  e.first_name || ' ' || e.last_name AS employee_name\n\nFROM profiles e\n\n-- 👨‍💼 Get manager\nJOIN profiles m \n  ON m.id = e.manager_id\n\n-- 📊 Check review\nLEFT JOIN monthly_reviews mr \n  ON mr.employee_id = e.id\n  AND mr.manager_id = m.id\n  AND mr.cycle_id = 'ffffffff-ffff-ffff-ffff-ffffffffffff'\n  AND mr.is_draft = false\n\nWHERE e.is_active = true\n\n-- ❌ No review submitted\nAND mr.id IS NULL;",
+        "options": {}
+      },
+      "id": "57f8ff60-605f-443c-a6ef-c28452e17d07",
+      "name": "Get Employees Without Submission",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        -592,
+        192
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 50,
+        "options": {}
+      },
+      "id": "c399a786-8bec-4324-80dc-acfd48221832",
+      "name": "Split Into Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -368,
+        192
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "push-annual-scores",
+        "authentication": "headerAuth",
+        "options": {}
+      },
+      "id": "44d67e87-7237-4672-9d47-fd0ad1b7f7d9",
+      "name": "Webhook: Push Annual Scores",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        512
+      ],
+      "webhookId": "wh_push_scores",
+      "disabled": true,
+      "notes": "Admin-triggered year-end SF score push"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT \n  employee_sf_id, \n  avg_score, \n  sf_rating_value, \n  months_approved, \n  year\nFROM annual_scores\nWHERE year = {{ $json.year }}\n  AND pushed_to_sf = false\n  AND months_approved >= 1\nORDER BY employee_sf_id;",
+        "options": {}
+      },
+      "id": "90c02a97-9dd4-4c01-a9b9-85940f32c58b",
+      "name": "Fetch Annual Scores from DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2272,
+        512
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{$env.SF_HOST}}/oauth/token",
+        "sendBody": true,
+        "specifyBody": "form",
+        "options": {}
+      },
+      "id": "33ff8b84-9faa-429a-a141-c96fc8ca27f4",
+      "name": "Refresh SF Token (Year-end)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2496,
+        512
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "9cd184d6-8aec-478f-9252-47bb4078507b",
+      "name": "Process One Employee at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        2720,
+        512
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://{{$env.SF_HOST}}/odata/v4/PerformanceReview",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $node['Refresh SF Token (Year-end)'].json.access_token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"formContentId\": \"{{ $env.SF_PERF_FORM_TEMPLATE_ID }}\",\n  \"userId\": \"{{ $json.employee_sf_id }}\",\n  \"reviewPeriod\": \"{{ $json.year }}\",\n  \"overallRating\": {{ $json.sf_rating_value }},\n  \"customFields\": {\n    \"annualScoreMonthlyTool\": {{ $json.avg_score }},\n    \"monthlyReviewsCompleted\": {{ $json.months_approved }}\n  }\n}",
+        "options": {}
+      },
+      "id": "fc564a75-f64a-4910-8d7c-df8ee204cfd5",
+      "name": "POST Annual Score to SF PM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2976,
+        432
+      ],
+      "disabled": true,
+      "notes": "Push annual score to SF Performance Management module"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.employee_sf_id }}",
+              "rightValue": 400,
+              "operator": {
+                "type": "boolean",
+                "operation": "exists",
+                "singleValue": true
+              },
+              "id": "4b9df5d5-b170-4745-be65-487be3330308"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {
+          "looseTypeValidation": true
+        }
+      },
+      "id": "1d7a2bf5-719a-429b-a811-96e60572068c",
+      "name": "Check for SF Error",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3168,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE annual_scores\nSET pushed_to_sf = true, pushed_at = NOW()\nWHERE employee_sf_id = '{{ $json.employee_sf_id || \"\" }}'\n  AND year = {{ $json.year }};",
+        "options": {}
+      },
+      "id": "f642aacc-5dc5-443b-85c4-a0b287b5be0a",
+      "name": "Mark Score as Pushed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2320,
+        256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sf_sync_log (\n  sync_type, status, records_in, records_out, error_detail, ran_at\n)\nVALUES (\n  'annual_score_push',\n  'failed',\n  1,\n  0,\n  '{{ JSON.stringify($json.body || {}) }}',\n  NOW()\n);",
+        "options": {}
+      },
+      "id": "c98fdcbd-7ee0-410e-995c-f878109ad4f1",
+      "name": "Log SF Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1856,
+        256
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "HlXvca2L9EmO1xUk",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      id: \"00000000-0000-0000-0000-000000400040\",\n      employee_id: \"400040\",\n      first_name: \"Jauyesh\",\n      last_name: \"BANDARA\",\n      job_title: \"Senior Tech Lead\",\n      department_id: \"00000000-0000-0000-0000-000020000057\",\n      role: \"employee\",\n      manager_id: \"00000000-0000-0000-0000-000000400003\",\n      is_active: true,\n      last_sap_sync: null,\n      created_at: new Date().toISOString(),\n      auth_email: \"aeshaesh327@gmail.com\"\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -256
+      ],
+      "id": "0a5042b6-f0bf-4f4f-bf67-6fdff2a81b11",
+      "name": "sample data"
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  {\n    json: {\n      year: 2025\n    }\n  }\n];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2048,
+        512
+      ],
+      "id": "74f3411f-b308-4315-898b-0baa97fa6f81",
+      "name": "sample data1"
+    },
+    {
+      "parameters": {
+        "sendTo": "jayeshmakhar@gmail.com",
+        "subject": "=✅ SF Employee Sync Complete — {{ $items().length }} records processed",
+        "message": "=<p>Hello Admin,</p> <p> The <strong>SF Employee Sync</strong> has been completed successfully. </p> <p> <strong>{{ $items().length }} records</strong> have been processed and updated in the system. </p> <p> All data is now up to date. Please review if needed. </p> <br> <p style=\"font-size: 12px; color: #888;\"> — Automation System </p>",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        528,
+        -256
+      ],
+      "id": "d8db4ea7-5b32-413c-8c1c-b1773818b90c",
+      "name": "Send a message",
+      "webhookId": "57d042ff-d969-498c-a6f5-2b688ab6db60",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "R1rDANAChkZ4rYpJ",
+          "name": "Gmail OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "jayeshmakhar@gmail.com",
+        "subject": "=📋 New Review Pending: From {{ $('Webhook: Review Submitted').item.json.body.employee.first_name }} ",
+        "message": "=<h2 style=\"color: #2e6c80;\">New Theme Submitted for Review 🚀</h2> <p>Hello Manager,</p> <p> A new theme has been submitted by <strong>{{ $('Webhook: Review Submitted').item.json.body.employee.first_name }}</strong> (Employee ID: <strong>{{ $('Webhook: Review Submitted').item.json.body.employee.employee_id }}</strong>). </p> <h3 style=\"color: #444;\">Theme Details:</h3> <ul> <li><strong>Title:</strong> {{ $('Webhook: Review Submitted').item.json.body.theme.title }}</li> <li><strong>Category:</strong> {{ $('Webhook: Review Submitted').item.json.body.theme.category }}</li> <li><strong>Description:</strong> {{ $('Webhook: Review Submitted').item.json.body.theme.description }}</li> <li><strong>Linked Objective:</strong> {{ $('Webhook: Review Submitted').item.json.body.theme.linked_objective }}</li> <li><strong>Evidence:</strong> <a href=\"{{ $('Webhook: Review Submitted').item.json.body.theme.achievement_evidence }}\" target=\"_blank\"> View Evidence </a> </li> <li><strong>Status:</strong> {{ $('Webhook: Review Submitted').item.json.body.theme.status }}</li> </ul> <p> Please review the submitted theme at your earliest convenience. </p> <br> <p style=\"font-size: 12px; color: #888;\"> — Automation System </p>\n\n\n\n",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -368,
+        -32
+      ],
+      "id": "74a31d80-6b86-4772-b331-c551a4be3c92",
+      "name": "Send a message1",
+      "webhookId": "608b136d-9317-44a4-9b00-b98f0f263b30",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "R1rDANAChkZ4rYpJ",
+          "name": "Gmail OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "jayeshmakhar@gmail.com",
+        "subject": "=Reminder: Submit your {{ new Date().toLocaleString('default', { month: 'long' }) }} {{ new Date().getFullYear() }} Employee Reviews",
+        "message": "=<h2 style=\"color: #d97706;\">⏰ Reminder: Employee Review Pending</h2> <p>Hello Manager,</p> <p> This is a reminder to complete the <strong>{{ new Date().toLocaleString('default', { month: 'long' }) }} {{ new Date().getFullYear() }}</strong> performance reviews for your team members. </p> <p> Some employee reviews are still pending submission. Kindly review and submit them at your earliest convenience. </p> <p> Timely submission helps ensure accurate performance tracking and smooth evaluation processes. </p> <br> <p> 👉 Please log in to the system and complete the pending reviews. </p> <br> <p style=\"font-size: 12px; color: #888;\"> — Automation System </p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        -144,
+        192
+      ],
+      "id": "9348edec-f12f-4d7b-9fea-ba5f18d8f281",
+      "name": "Send a message2",
+      "webhookId": "9be917d7-1ad2-4d24-8ae3-687d6d3dd56d",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "R1rDANAChkZ4rYpJ",
+          "name": "Gmail OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toRecipients": "=a",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.microsoftOutlook",
+      "typeVersion": 2,
+      "position": [
+        736,
+        -256
+      ],
+      "id": "ced73aae-2b1f-4c5d-9eb0-6429aacefc4c",
+      "name": "Send a message3",
+      "webhookId": "c096add1-5666-48b6-8f10-b087f36ea7fd"
+    }
+  ],
+  "pinData": {
+    "Webhook: Review Submitted": [
+      {
+        "json": {
+          "headers": {
+            "host": "soxibetahr.app.n8n.cloud",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            "content-length": "772",
+            "accept": "*/*",
+            "accept-encoding": "gzip, br",
+            "accept-language": "en-US,en;q=0.9",
+            "cdn-loop": "cloudflare; loops=1; subreqs=1",
+            "cf-connecting-ip": "2409:40f0:4020:38f3:405d:42b1:10af:7626",
+            "cf-ew-via": "15",
+            "cf-ipcountry": "IN",
+            "cf-ray": "9ebc44501ed92757-FRA",
+            "cf-visitor": "{\"scheme\":\"https\"}",
+            "cf-worker": "n8n.cloud",
+            "content-type": "application/json",
+            "origin": "http://localhost:5175",
+            "priority": "u=1, i",
+            "referer": "http://localhost:5175/",
+            "sec-ch-ua": "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Google Chrome\";v=\"146\"",
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": "\"Windows\"",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "cross-site",
+            "x-forwarded-for": "2409:40f0:4020:38f3:405d:42b1:10af:7626, 172.70.248.140",
+            "x-forwarded-host": "soxibetahr.app.n8n.cloud",
+            "x-forwarded-port": "443",
+            "x-forwarded-proto": "https",
+            "x-forwarded-server": "traefik-prod-users-gwc-45-758d9d6c7b-6bc8q",
+            "x-is-trusted": "yes",
+            "x-real-ip": "2409:40f0:4020:38f3:405d:42b1:10af:7626"
+          },
+          "params": {},
+          "query": {},
+          "body": {
+            "employee": {
+              "id": "00000000-0000-0000-0000-000000400003",
+              "employee_id": "400003",
+              "first_name": "Pradeep Dilruk Sri",
+              "last_name": "Karunanayaka Rankoth Pedi Durayalage",
+              "job_title": "Senior Software Architect",
+              "department_id": "00000000-0000-0000-0000-000020000057",
+              "role": "manager",
+              "manager_id": "00000000-0000-0000-0000-000000400089",
+              "is_active": true,
+              "last_sap_sync": null,
+              "created_at": "2026-04-13T12:30:19.382681+00:00",
+              "auth_email": "pkarunanayake@isa.ae"
+            },
+            "theme": {
+              "employee_id": "00000000-0000-0000-0000-000000400003",
+              "cycle_id": "ffffffff-ffff-ffff-ffff-ffffffffffff",
+              "title": "software engineer",
+              "category": "Leadership & Mentoring",
+              "description": "lead the project",
+              "linked_objective": "abcdf",
+              "achievement_evidence": "http://localhost:5175/dashboard",
+              "status": "pending_review"
+            }
+          },
+          "webhookUrl": "https://soxibetahr.app.n8n.cloud/webhook/review-submitted",
+          "executionMode": "production"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ],
+    "Schedule: Nightly 02:00": [
+      {
+        "json": {
+          "timestamp": "2026-04-14T15:00:06.003+04:00",
+          "Readable date": "April 14th 2026, 3:00:06 pm",
+          "Readable time": "3:00:06 pm",
+          "Day of week": "Tuesday",
+          "Year": "2026",
+          "Month": "April",
+          "Day of month": "14",
+          "Hour": "15",
+          "Minute": "00",
+          "Second": "06",
+          "Timezone": "Asia/Dubai (UTC+04:00)"
+        },
+        "pairedItem": {
+          "item": 0
+        }
+      }
+    ]
+  },
+  "connections": {
+    "Schedule: Nightly 02:00": {
+      "main": [
+        [
+          {
+            "node": "Get SF OAuth Token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get SF OAuth Token": {
+      "main": [
+        [
+          {
+            "node": "Fetch Employees from SF",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Employees from SF": {
+      "main": [
+        [
+          {
+            "node": "sample data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upsert Employees in DB": {
+      "main": [
+        [
+          {
+            "node": "Log Sync Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Sync Result": {
+      "main": [
+        [
+          {
+            "node": "Send a message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Review Submitted": {
+      "main": [
+        [
+          {
+            "node": "Get Manager Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Manager Details": {
+      "main": [
+        [
+          {
+            "node": "Send a message1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule: 25th Monthly 09:00": {
+      "main": [
+        [
+          {
+            "node": "Get Employees Without Submission",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Employees Without Submission": {
+      "main": [
+        [
+          {
+            "node": "Split Into Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Into Batches": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Send a message2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook: Push Annual Scores": {
+      "main": [
+        [
+          {
+            "node": "sample data1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Annual Scores from DB": {
+      "main": [
+        [
+          {
+            "node": "Refresh SF Token (Year-end)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh SF Token (Year-end)": {
+      "main": [
+        [
+          {
+            "node": "Process One Employee at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process One Employee at a Time": {
+      "main": [
+        [],
+        [
+          {
+            "node": "POST Annual Score to SF PM",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST Annual Score to SF PM": {
+      "main": [
+        [
+          {
+            "node": "Check for SF Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check for SF Error": {
+      "main": [
+        [
+          {
+            "node": "Mark Score as Pushed",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log SF Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sample data": {
+      "main": [
+        [
+          {
+            "node": "Upsert Employees in DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "sample data1": {
+      "main": [
+        [
+          {
+            "node": "Fetch Annual Scores from DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Score as Pushed": {
+      "main": [
+        [
+          {
+            "node": "Process One Employee at a Time",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message1": {
+      "main": [
+        [
+          {
+            "node": "MS Teams Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message2": {
+      "main": [
+        [
+          {
+            "node": "Split Into Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send a message": {
+      "main": [
+        [
+          {
+            "node": "Send a message3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "2ffb80b8-afb2-41e8-99ec-96fa4ca6759b",
+  "meta": {
+    "instanceId": "2703da53b8ab48022e9910bfb905da40f9c50fad347da62bbc278eeaa17ffe27"
+  },
+  "id": "hYMkG7nJu5MUU0oA",
+  "tags": []
+}
