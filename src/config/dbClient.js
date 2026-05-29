@@ -1,5 +1,5 @@
 // Pure Custom Database Client (No Supabase)
-const BACKEND_URL = 'http://localhost:5000/api/db';
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000/api/db';
 
 class QueryBuilder {
   constructor(table) {
