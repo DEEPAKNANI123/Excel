@@ -352,6 +352,8 @@ app.post('/api/db/query', authenticateToken, async (req, res) => {
                              if (op === 'eq') {
                                  values.push(val);
                                  return `"${col}" = $${valIndex++}`;
+                             } else if (op === 'is' && val === 'null') {
+                                 return `"${col}" IS NULL`;
                              }
                          }
                          return 'FALSE';
