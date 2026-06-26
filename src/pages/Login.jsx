@@ -3,7 +3,7 @@ import { useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/config/supabaseClient";
 import "../styles/auth.css";
 
-import logo from "../assets/exel-logo-white.png";
+import logo from "../assets/isn-logo.png";
 
 function Login() {
   const [form, setForm] = useState({
